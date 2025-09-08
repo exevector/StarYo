@@ -1,0 +1,63 @@
+[functions]
+  directory = "netlify/functions"
+
+[[redirects]]
+  # Proxy for nano remove
+  from = "/api/nano/remove"
+  to = "/.netlify/functions/nano-remove"
+  status = 200
+
+[[redirects]]
+  # Proxy for nano insert
+  from = "/api/nano/insert"
+  to = "/.netlify/functions/nano-insert"
+  status = 200
+
+[[redirects]]
+  # Proxy for animation
+  from = "/api/animate"
+  to = "/.netlify/functions/animate"
+  status = 200
+
+[[redirects]]
+  # Proxy for combined remove & insert
+  from = "/api/remove-insert"
+  to = "/.netlify/functions/remove-insert"
+  status = 200
+
+[[redirects]]
+  # Proxy for health check
+  from = "/api/health"
+  to = "/.netlify/functions/health"
+  status = 200
+
+# Additional root-level proxies so that requests without the /api prefix still reach the functions.
+[[redirects]]
+  # Root-level proxy for nano remove
+  from = "/nano-remove"
+  to = "/.netlify/functions/nano-remove"
+  status = 200
+
+[[redirects]]
+  # Root-level proxy for nano insert
+  from = "/nano-insert"
+  to = "/.netlify/functions/nano-insert"
+  status = 200
+
+[[redirects]]
+  # Root-level proxy for animation
+  from = "/animate"
+  to = "/.netlify/functions/animate"
+  status = 200
+
+[[redirects]]
+  # Root-level proxy for combined remove & insert
+  from = "/remove-insert"
+  to = "/.netlify/functions/remove-insert"
+  status = 200
+
+[[redirects]]
+  # Root-level proxy for health check
+  from = "/health"
+  to = "/.netlify/functions/health"
+  status = 200

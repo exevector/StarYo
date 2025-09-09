@@ -20,11 +20,13 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Show working directory (debug)
+        run: |
+          pwd
+          ls -R
+
       - name: Run E2E tests
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           NANO_TEST_IMAGE: ${{ secrets.NANO_TEST_IMAGE }}
         run: npm run test
-
-      - name: List repo contents (debug)
-        run: ls -R

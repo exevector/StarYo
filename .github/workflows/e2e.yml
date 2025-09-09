@@ -8,6 +8,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: . # работаем из корня
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,18 +22,13 @@ jobs:
           node-version: '18'
 
       - name: Install dependencies
-        run: npm install || true   # если нет package-lock.json, не падать
-
-      - name: Debug repo structure
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Repo tree:"
-          ls -R
+        run: npm install
 
       - name: Run E2E tests
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           NANO_TEST_IMAGE: ${{ secrets.NANO_TEST_IMAGE }}
-        run: |
-          node ./tests/run-tests.mjs
+        run: node ./tests/run-tests.mjs
+
+      - name: List repo contents (debug)
+        run: ls -R

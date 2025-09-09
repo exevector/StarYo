@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .   # запуск из корня проекта
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,7 +21,7 @@ jobs:
           node-version: '18'
 
       - name: Install dependencies
-        run: npm install || true
+        run: npm install
 
       - name: Run E2E tests
         env:

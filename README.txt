@@ -7,3 +7,4 @@ netlify/functions/health.js
 netlify/functions/nano-remove.js
 public/index.html
 tests/run-tests.mjs
+ 

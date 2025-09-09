@@ -1,15 +1,10 @@
 {
   "name": "staryo",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node tests/run-tests.mjs",
     "test:e2e": "node tests/run-tests.mjs"
-  }
-} {
-  "name": "staryo",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "test": "node tests/run-tests.mjs"
   }
 }

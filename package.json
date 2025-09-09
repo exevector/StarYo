@@ -1,0 +1,8 @@
+{
+  "name": "staryo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "node tests/run-tests.mjs"
+  }
+}

@@ -10,10 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: .   # запуск из корня проекта
+        working-directory: .
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -21,13 +23,15 @@ jobs:
           node-version: '18'
 
       - name: Install dependencies
-        run: npm install
+        run: npm install || true
+
+      - name: Debug tree
+        run: |
+          echo "PWD=$(pwd)"
+          ls -R
 
       - name: Run E2E tests
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           NANO_TEST_IMAGE: ${{ secrets.NANO_TEST_IMAGE }}
         run: node ./tests/run-tests.mjs
-
-      - name: List repo contents (debug)
-        run: ls -R

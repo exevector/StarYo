@@ -1,4 +1,9 @@
-# StarYo CI & E2E bundle
+StarYo CI & E2E setup.
+Upload these files into your GitHub repo (preserve folder structure).
 
-Upload this ZIP to your GitHub repo (`staryo`) as a new branch `ci-e2e-netlify-setup`,
-then open a Pull Request into `main`.
+Important structure:
+.github/workflows/e2e.yml
+netlify/functions/health.js
+netlify/functions/nano-remove.js
+public/index.html
+tests/run-tests.mjs

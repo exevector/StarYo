@@ -1,16 +1,25 @@
 name: E2E
+
 on:
-  push: { branches: [ main ] }
-  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: '18' }
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
       - name: Run E2E tests
+        run: npm run test:e2e
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           NANO_TEST_IMAGE: ${{ secrets.NANO_TEST_IMAGE }}
-        run: node tests/run-tests.mjs

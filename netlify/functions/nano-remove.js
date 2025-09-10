@@ -1,86 +1,109 @@
 // netlify/functions/nano-remove.js
+const API_URL =
+  process.env.NANO_API_URL ||
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent";
+const API_KEY = process.env.NANO_API_KEY; // Твой Google API key
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "OPTIONS,POST",
+};
+
 exports.handler = async (event) => {
-  const cors = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
-  };
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: cors };
-  }
+  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS };
 
   try {
-    const { image, prompt, strength } = JSON.parse(event.body || '{}');
-    if (!image) throw new Error('MISSING_IMAGE');
+    const { image, prompt = "Remove the background and output PNG with transparency.", strength = 0.85 } =
+      JSON.parse(event.body || "{}");
+    if (!image) throw new Error("MISSING_IMAGE");
 
-    // --- если заданы переменные окружения — пробуем внешний API ---
-    const hasExternal = !!(process.env.NANO_API_URL && process.env.NANO_API_KEY);
-    let used = 'stub', external = null;
+    // 1) Скачиваем исходное изображение и кодируем в base64
+    const imgRes = await fetch(image, { headers: { Range: "bytes=0-" } });
+    if (!imgRes.ok) throw new Error(`IMAGE_FETCH_${imgRes.status}`);
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    const mime = guessMime(image) || imgRes.headers.get("content-type") || "image/jpeg";
+    const b64 = buf.toString("base64");
 
-    if (hasExternal) {
-      try {
-        const apiRes = await fetch(process.env.NANO_API_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.NANO_API_KEY}`
-          },
-          body: JSON.stringify({ image, prompt, strength })
-        });
+    // 2) Готовим запрос к Gemini 2.5 Flash Image (aka Nano Banana)
+    if (!API_KEY) throw new Error("MISSING_GEMINI_API_KEY");
 
-        if (!apiRes.ok) throw new Error('NANO_BAD_STATUS_' + apiRes.status);
-        const data = await apiRes.json();
+    const body = {
+      contents: [
+        {
+          parts: [
+            { text: `${prompt}\nstrength=${strength}` },
+            { inline_data: { mime_type: mime, data: b64 } }, // исходник
+          ],
+        },
+      ],
+    };
 
-        const base64 =
-          data?.result?.base64 || data?.base64 || data?.data || null;
+    const r = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": API_KEY, // В Gemini ключ передаётся так
+      },
+      body: JSON.stringify(body),
+    });
 
-        if (!base64) throw new Error('NANO_NO_BASE64');
-
-        used = 'external';
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json', ...cors },
-          body: JSON.stringify({
-            ok: true,
-            used,
-            result: { base64, format: data?.result?.format || 'png' }
-          })
-        };
-      } catch (e) {
-        external = String(e);
-        // падаем в заглушку ниже
-      }
+    // 3) Читаем ответ: ищем inlineData (PNG base64) в первой кандидатуре
+    const tx = await r.text();
+    if (!r.ok) {
+      return okFallback(image, prompt, strength, `GEMINI_STATUS_${r.status}`, tx.slice(0, 2000));
     }
 
-    // --- заглушка (прозрачная 1×1 PNG) + мини-проверка доступности картинки ---
-    let reach = null;
-    try {
-      const r = await fetch(image, { headers: { Range: 'bytes=0-0' } });
-      reach = { ok: r.ok, status: r.status, url: r.url };
-    } catch (e) {
-      reach = { ok: false, error: String(e) };
+    let data;
+    try { data = JSON.parse(tx); } catch { return okFallback(image, prompt, strength, "GEMINI_JSON_PARSE", tx.slice(0, 2000)); }
+
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const pngB64 = parts.find(p => p.inline_data)?.inline_data?.data || null;
+
+    if (!pngB64) {
+      // Иногда модель отвечает текстом — отдаём фолбэк, но без 500
+      const text = parts.find(p => p.text)?.text;
+      return okFallback(image, prompt, strength, "GEMINI_NO_IMAGE", text || data);
     }
 
-    const tinyPngBase64 =
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWP4z8DwHwAF7QJ6x4i4VwAAAABJRU5ErkJggg==';
-
+    // Успех — возвращаем реальную картинку
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json', ...cors },
+      headers: { "Content-Type": "application/json", ...CORS },
       body: JSON.stringify({
         ok: true,
-        used,
-        external,      // если внешка упала — увидим причину
-        echo: { image, prompt, strength },
-        reach,
-        result: { base64: tinyPngBase64, format: 'png' }
-      })
+        used: "external",
+        model: "gemini-2.5-flash-image-preview",
+        result: { base64: pngB64, format: "png" },
+      }),
     };
-  } catch (err) {
-    return {
-      statusCode: 500,
-      headers: { 'Content-Type': 'application/json', ...cors },
-      body: JSON.stringify({ error: 'INTERNAL', message: String(err?.message || err) })
-    };
+  } catch (e) {
+    return okFallback(null, null, null, "EXCEPTION", String(e?.message || e));
   }
 };
+
+function okFallback(image, prompt, strength, note, extra) {
+  // Прозрачная 1×1 PNG — чтобы фронт не падал
+  const tiny =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWP4z8DwHwAF7QJ6x4i4VwAAAABJRU5ErkJggg==";
+  return {
+    statusCode: 200,
+    headers: { "Content-Type": "application/json", ...CORS },
+    body: JSON.stringify({
+      ok: true,
+      used: "stub",
+      note,
+      echo: { image, prompt, strength },
+      extra,
+      result: { base64: tiny, format: "png" },
+    }),
+  };
+}
+
+function guessMime(url) {
+  const u = url.toLowerCase();
+  if (u.endsWith(".png")) return "image/png";
+  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
+  if (u.endsWith(".webp")) return "image/webp";
+  return null;
+}

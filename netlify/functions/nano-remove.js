@@ -1,64 +1,50 @@
 // netlify/functions/nano-remove.js
-export const handler = async (event) => {
+exports.handler = async (event) => {
+  const cors = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+  };
+
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: cors };
+  }
+
   try {
-    if (event.httpMethod !== 'POST') {
-      return resp(405, { error: 'POST only' });
-    }
+    const { image, prompt, strength } = JSON.parse(event.body || '{}');
+    if (!image) throw new Error('MISSING_IMAGE');
 
-    const API_URL = process.env.BASE44_API_URL;   // задал в Netlify
-    const API_KEY = process.env.BASE44_API_KEY;   // задал в Netlify
-
-    if (!API_URL) {
-      return resp(500, { error: 'MISSING_BASE44_API_URL' });
-    }
-
-    const body = JSON.parse(event.body || '{}');
-    const { image, image_url, prompt, strength = 0.85 } = body || {};
-    if (!image && !image_url) {
-      return resp(400, { error: 'image or image_url required' });
-    }
-
-    // Проксируем на апстрим Base44 (формат: JSON)
-    const upstream = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {})
-      },
-      body: JSON.stringify({ image, image_url, prompt, strength })
-    });
-
-    const text = await upstream.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-    if (!upstream.ok) {
-      return resp(upstream.status, {
-        error: 'UPSTREAM_ERROR',
-        status: upstream.status,
-        data
+    // Мини-проверка доступности картинки (GET с Range, чтобы почти ничего не качать)
+    let reach = null;
+    try {
+      const r = await fetch(image, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' }
       });
+      reach = { ok: r.ok, status: r.status, url: r.url };
+    } catch (e) {
+      reach = { ok: false, error: String(e) };
     }
 
-    // Нормализуем ответ: пробуем вернуть result.base64, иначе что пришло
-    const b64 = data?.result?.base64 || data?.base64 || data?.data || null;
-    const result_url = data?.result_url || data?.url || null;
+    // Прозрачная PNG 1x1 — заглушка
+    const tinyPngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWP4z8DwHwAF7QJ6x4i4VwAAAABJRU5ErkJggg==';
 
-    if (b64) return resp(200, { result: { base64: b64 } });
-    if (result_url) return resp(200, { result_url });
-
-    // Если апстрим вернул другой формат — отдаём как есть
-    return resp(200, data);
-  } catch (e) {
-    return resp(500, { error: 'INTERNAL', message: String(e?.message || e) });
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', ...cors },
+      body: JSON.stringify({
+        ok: true,
+        echo: { image, prompt, strength },
+        reach,
+        result: { base64: tinyPngBase64, format: 'png' }
+      })
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
+      headers: { 'Content-Type': 'application/json', ...cors },
+      body: JSON.stringify({ error: 'INTERNAL', message: String(err?.message || err) })
+    };
   }
 };
-
-const resp = (code, obj) => ({
-  statusCode: code,
-  headers: {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*'
-  },
-  body: JSON.stringify(obj)
-});

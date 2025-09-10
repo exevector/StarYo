@@ -1,145 +1,88 @@
-// Netlify Function: nano-insert
-// Receives a JSON payload with two base64-encoded images (scene and person) and an optional instruction.
-// Uses the Gemini API to insert the person into the scene image according to the instruction.
-// Responds with a JSON object containing the base64-encoded result image (without data URI prefix).
+// netlify/functions/nano-remove.js
 
-exports.handler = async function(event, context) {
-  // Determine allowed origin and CORS headers
-  const allowOrigin = process.env.ALLOW_ORIGIN || '*';
-  const corsHeaders = {
-    // Allow requests from configured origin (or any origin during development).
-    'Access-Control-Allow-Origin': allowOrigin,
-    // Accept common headers. Add Authorization in case the client sends it.
+const DEFAULT_TIMEOUT_MS = 25000;
+
+exports.handler = async (event) => {
+  const cors = {
+    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    // Permit GET for simple health checks, POST for actual work, and OPTIONS for preflight.
-    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS'
   };
 
-  // CORS preflight
   if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 204,
-      headers: corsHeaders,
-      body: ''
-    };
+    return { statusCode: 204, headers: cors, body: '' };
   }
+
   try {
-    if (event.httpMethod === 'GET') {
-      // Respond OK for simple GET requests with CORS headers. Do not perform insertion.
-      return {
-        statusCode: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'nano-insert ready' }),
-      };
-    }
-    if (event.httpMethod !== 'POST') {
-      return {
-        statusCode: 405,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'Method not allowed' }),
-      };
-    }
-    const body = event.body ? JSON.parse(event.body) : {};
-    const { scene, person, instruction } = body;
-    if (!scene || !person) {
-      return {
-        statusCode: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'Missing scene or person' }),
-      };
-    }
-    const apiKey = process.env.NANO_API_KEY;
-    const model = process.env.NANO_MODEL || 'gemini-2.5-flash-image-preview';
-    if (!apiKey) {
-      return {
-        statusCode: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'NANO_API_KEY not set' }),
-      };
-    }
-    // Extract base64 and MIME types for both images
-    function parseData(data) {
-      let mime = 'image/jpeg';
-      let b64 = data;
-      const m = /^data:(.*?);base64,(.*)$/.exec(data);
-      if (m) {
-        mime = m[1];
-        b64 = m[2];
-      }
-      return { mime, b64 };
-    }
-    const sceneParsed = parseData(scene);
-    const personParsed = parseData(person);
-    const prompt = instruction || 'insert the person into the scene in a natural way';
-    const geminiBody = {
-      contents: [
-        {
-          parts: [
-            { text: prompt },
-            {
-              inline_data: {
-                mime_type: sceneParsed.mime,
-                data: sceneParsed.b64,
-              },
-            },
-            {
-              inline_data: {
-                mime_type: personParsed.mime,
-                data: personParsed.b64,
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify(geminiBody),
+    const req = JSON.parse(event.body || '{}');
+    const image = req.image;
+    const prompt = req.prompt || 'remove';
+    const strength = typeof req.strength === 'number' ? req.strength : 0.85;
+
+    // Читаем переменные окружения (заполним на шаге 2, когда будем подключать реальное API)
+    const API_URL = process.env.BASE44_REMOVE_URL;   // ← URL реального эндпоинта (Base44/banana/и т.п.)
+    const API_KEY = process.env.BASE44_API_KEY;      // ← ключ
+
+    // Хелпер: фоллбэк-ответ, чтобы НЕ отдавать 500
+    const fallback = (note, extra = {}) => ({
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', ...cors },
+      body: JSON.stringify({
+        image,
+        usedPrompt: prompt,
+        strength,
+        note,
+        ...extra
+      })
     });
-    if (!response.ok) {
-      const text = await response.text();
-      return {
-        statusCode: response.status,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'Gemini API error', details: text }),
-      };
+
+    // Если нет API-данных — сразу эхо-режим
+    if (!API_URL || !API_KEY) {
+      return fallback('stubbed remove (no API credentials)');
     }
-    const result = await response.json();
-    let outData;
-    const candidates = result?.candidates;
-    if (Array.isArray(candidates) && candidates.length > 0) {
-      const parts = candidates[0]?.content?.parts;
-      if (Array.isArray(parts)) {
-        for (const part of parts) {
-          if (part.inline_data && part.inline_data.data) {
-            outData = part.inline_data.data;
-            break;
-          }
-        }
-      }
+
+    // Реальный вызов API с таймаутом и безопасным логированием
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+    let resp, data;
+    try {
+      resp = await fetch(API_URL, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${API_KEY}`
+        },
+        body: JSON.stringify({ image, prompt, strength })
+      });
+      data = await resp.json().catch(() => ({}));
+    } catch (e) {
+      clearTimeout(timer);
+      // падать 500 не будем — фоллбэк
+      return fallback('stubbed remove (fetch failed)', { error: String(e?.message || e) });
     }
-    if (!outData) {
-      return {
-        statusCode: 502,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'No image returned from Gemini' }),
-      };
+
+    clearTimeout(timer);
+
+    // Если внешний сервис ответил не 2xx — фоллбэк
+    if (!resp.ok) {
+      return fallback('stubbed remove (remote non-2xx)', { status: resp.status, data });
     }
+
+    // Удача — отдаём как есть (или оберни под нужный формат)
     return {
       statusCode: 200,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: outData }),
+      headers: { 'Content-Type': 'application/json', ...cors },
+      body: JSON.stringify(data)
     };
+
   } catch (err) {
+    // Последняя защита — никаких 500
     return {
-      statusCode: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: err.message || err.toString() }),
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', ...cors },
+      body: JSON.stringify({ note: 'stubbed remove (exception)', error: String(err?.message || err) })
     };
   }
 };

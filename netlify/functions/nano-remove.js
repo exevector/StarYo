@@ -1,49 +1,64 @@
 // netlify/functions/nano-remove.js
-// STUB: возвращает ту же картинку (эха), чтобы пройти CORS/интеграционные тесты.
-// Позже заменим на реальный вызов Gemini с правильным payload и mime.
-
-const allowOrigin = process.env.ALLOW_ORIGIN || '*';
-const cors = {
-  'Access-Control-Allow-Origin': allowOrigin,
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'Access-Control-Allow-Methods': 'POST,GET,OPTIONS',
-};
-
-exports.handler = async (event) => {
-  // CORS preflight
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: cors, body: '' };
-  }
-  // Информативный GET
-  if (event.httpMethod === 'GET') {
-    return {
-      statusCode: 200,
-      headers: { ...cors, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ok: true, expects: '{ image (base64), prompt? }' }),
-    };
-  }
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers: cors, body: JSON.stringify({ error: 'Method not allowed' }) };
-  }
-
+export const handler = async (event) => {
   try {
-    const { image, prompt } = JSON.parse(event.body || '{}');
-    if (!image) {
-      return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'image (base64) required' }) };
+    if (event.httpMethod !== 'POST') {
+      return resp(405, { error: 'POST only' });
     }
 
-    // ИМЕННО СЕЙЧАС: просто возвращаем то, что пришло (эха).
-    // Это позволит Base44 считать API online и продолжить интеграцию.
-    return {
-      statusCode: 200,
-      headers: { ...cors, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image,          // тот же base64
-        usedPrompt: prompt || null,
-        note: 'stubbed remove (echo)',
-      }),
-    };
+    const API_URL = process.env.BASE44_API_URL;   // задал в Netlify
+    const API_KEY = process.env.BASE44_API_KEY;   // задал в Netlify
+
+    if (!API_URL) {
+      return resp(500, { error: 'MISSING_BASE44_API_URL' });
+    }
+
+    const body = JSON.parse(event.body || '{}');
+    const { image, image_url, prompt, strength = 0.85 } = body || {};
+    if (!image && !image_url) {
+      return resp(400, { error: 'image or image_url required' });
+    }
+
+    // Проксируем на апстрим Base44 (формат: JSON)
+    const upstream = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {})
+      },
+      body: JSON.stringify({ image, image_url, prompt, strength })
+    });
+
+    const text = await upstream.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!upstream.ok) {
+      return resp(upstream.status, {
+        error: 'UPSTREAM_ERROR',
+        status: upstream.status,
+        data
+      });
+    }
+
+    // Нормализуем ответ: пробуем вернуть result.base64, иначе что пришло
+    const b64 = data?.result?.base64 || data?.base64 || data?.data || null;
+    const result_url = data?.result_url || data?.url || null;
+
+    if (b64) return resp(200, { result: { base64: b64 } });
+    if (result_url) return resp(200, { result_url });
+
+    // Если апстрим вернул другой формат — отдаём как есть
+    return resp(200, data);
   } catch (e) {
-    return { statusCode: 500, headers: cors, body: JSON.stringify({ error: e.message }) };
+    return resp(500, { error: 'INTERNAL', message: String(e?.message || e) });
   }
 };
+
+const resp = (code, obj) => ({
+  statusCode: code,
+  headers: {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*'
+  },
+  body: JSON.stringify(obj)
+});

@@ -1,109 +1,93 @@
 // netlify/functions/nano-remove.js
-const API_URL =
-  process.env.NANO_API_URL ||
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent";
-const API_KEY = process.env.NANO_API_KEY; // Твой Google API key
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type",
-  "Access-Control-Allow-Methods": "OPTIONS,POST",
-};
-
-exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS };
-
-  try {
-    const { image, prompt = "Remove the background and output PNG with transparency.", strength = 0.85 } =
-      JSON.parse(event.body || "{}");
-    if (!image) throw new Error("MISSING_IMAGE");
-
-    // 1) Скачиваем исходное изображение и кодируем в base64
-    const imgRes = await fetch(image, { headers: { Range: "bytes=0-" } });
-    if (!imgRes.ok) throw new Error(`IMAGE_FETCH_${imgRes.status}`);
-    const buf = Buffer.from(await imgRes.arrayBuffer());
-    const mime = guessMime(image) || imgRes.headers.get("content-type") || "image/jpeg";
-    const b64 = buf.toString("base64");
-
-    // 2) Готовим запрос к Gemini 2.5 Flash Image (aka Nano Banana)
-    if (!API_KEY) throw new Error("MISSING_GEMINI_API_KEY");
-
-    const body = {
-      contents: [
-        {
-          parts: [
-            { text: `${prompt}\nstrength=${strength}` },
-            { inline_data: { mime_type: mime, data: b64 } }, // исходник
-          ],
-        },
-      ],
-    };
-
-    const r = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": API_KEY, // В Gemini ключ передаётся так
-      },
-      body: JSON.stringify(body),
-    });
-
-    // 3) Читаем ответ: ищем inlineData (PNG base64) в первой кандидатуре
-    const tx = await r.text();
-    if (!r.ok) {
-      return okFallback(image, prompt, strength, `GEMINI_STATUS_${r.status}`, tx.slice(0, 2000));
-    }
-
-    let data;
-    try { data = JSON.parse(tx); } catch { return okFallback(image, prompt, strength, "GEMINI_JSON_PARSE", tx.slice(0, 2000)); }
-
-    const parts = data?.candidates?.[0]?.content?.parts || [];
-    const pngB64 = parts.find(p => p.inline_data)?.inline_data?.data || null;
-
-    if (!pngB64) {
-      // Иногда модель отвечает текстом — отдаём фолбэк, но без 500
-      const text = parts.find(p => p.text)?.text;
-      return okFallback(image, prompt, strength, "GEMINI_NO_IMAGE", text || data);
-    }
-
-    // Успех — возвращаем реальную картинку
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json", ...CORS },
-      body: JSON.stringify({
-        ok: true,
-        used: "external",
-        model: "gemini-2.5-flash-image-preview",
-        result: { base64: pngB64, format: "png" },
-      }),
-    };
-  } catch (e) {
-    return okFallback(null, null, null, "EXCEPTION", String(e?.message || e));
+export default async function handler(request) {
+  // CORS / preflight
+  if (request.method === 'OPTIONS') {
+    return new Response('', { status: 204, headers: cors() });
   }
-};
 
-function okFallback(image, prompt, strength, note, extra) {
-  // Прозрачная 1×1 PNG — чтобы фронт не падал
-  const tiny =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4AWP4z8DwHwAF7QJ6x4i4VwAAAABJRU5ErkJggg==";
-  return {
-    statusCode: 200,
-    headers: { "Content-Type": "application/json", ...CORS },
-    body: JSON.stringify({
-      ok: true,
-      used: "stub",
-      note,
-      echo: { image, prompt, strength },
-      extra,
-      result: { base64: tiny, format: "png" },
-    }),
+  const API_URL = process.env.NANO_API_URL;   // напр.: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent
+  const API_KEY = process.env.NANO_API_KEY;   // твой Google API key
+
+  if (!API_URL || !API_KEY) {
+    return json(500, { ok: false, error: 'MISCONFIG', need: ['NANO_API_URL','NANO_API_KEY'] });
+  }
+
+  // читаем вход
+  let body = {};
+  try { body = await request.json(); } catch {}
+  const {
+    image,
+    prompt = 'Remove the background and output PNG with transparency.',
+    strength = 0.85,
+  } = body;
+
+  if (!image) return json(400, { ok: false, error: 'MISSING_IMAGE' });
+
+  // скачиваем картинку
+  const imgRes = await fetch(image, { headers: { Range: 'bytes=0-' } });
+  if (!imgRes.ok) {
+    return json(400, { ok: false, error: 'IMAGE_FETCH', status: imgRes.status });
+  }
+  const buf = Buffer.from(await imgRes.arrayBuffer());
+  const mime = imgRes.headers.get('content-type') || guessMime(image) || 'image/jpeg';
+  const b64  = buf.toString('base64');
+
+  // запрос к Gemini
+  const payload = {
+    contents: [
+      {
+        parts: [
+          { text: `${prompt}\nstrength=${strength}` },
+          { inline_data: { mime_type: mime, data: b64 } },
+        ],
+      },
+    ],
   };
+
+  const r = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': API_KEY },
+    body: JSON.stringify(payload),
+  });
+
+  const txt = await r.text();
+  if (!r.ok) {
+    return json(r.status, { ok: false, error: 'GEMINI_ERROR', detail: txt.slice(0, 2000) });
+  }
+
+  let data;
+  try { data = JSON.parse(txt); }
+  catch { return json(500, { ok: false, error: 'PARSE_ERROR', detail: txt.slice(0, 2000) }); }
+
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const out64 = parts.find(p => p.inline_data)?.inline_data?.data || null;
+  const text  = parts.find(p => p.text)?.text;
+
+  if (!out64) {
+    return json(200, { ok: true, note: 'NO_IMAGE_FROM_MODEL', modelText: text || null });
+  }
+
+  return json(200, { ok: true, model: 'gemini', result: { base64: out64, format: 'png' } });
 }
 
+// helpers
+function cors() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'POST,OPTIONS',
+  };
+}
+function json(status, data) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...cors() },
+  });
+}
 function guessMime(url) {
   const u = url.toLowerCase();
-  if (u.endsWith(".png")) return "image/png";
-  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
-  if (u.endsWith(".webp")) return "image/webp";
+  if (u.endsWith('.png')) return 'image/png';
+  if (u.endsWith('.webp')) return 'image/webp';
+  if (u.endsWith('.jpg') || u.endsWith('.jpeg')) return 'image/jpeg';
   return null;
 }

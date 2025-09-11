@@ -1,5 +1,125 @@
 <!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>StarYo</title></head>
-  <body><h1>StarYo</h1><p>/.netlify/functions/health</p></body>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>StarYo — Vidu demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; line-height: 1.35; }
+      main { max-width: 900px; margin: 0 auto; }
+      label { display: block; margin: 12px 0 6px; font-weight: 600; }
+      input[type="text"], textarea {
+        width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #ccc; border-radius: 10px;
+      }
+      textarea { min-height: 80px; }
+      button {
+        margin-top: 14px; padding: 10px 16px; border: 0; border-radius: 10px; background: black; color: white; cursor: pointer;
+      }
+      button[disabled] { opacity: .6; cursor: progress; }
+      #log pre { background: #f6f6f6; padding: 10px; border-radius: 8px; overflow: auto; }
+      video { max-width: 100%; border-radius: 12px; margin-top: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>StarYo — Vidu (img → video)</h1>
+
+      <label>Image URL</label>
+      <input id="imgUrl" type="text"
+             value="https://upload.wikimedia.org/wikipedia/commons/3/3f/JPEG_example_flower.jpg" />
+
+      <label>Prompt</label>
+      <textarea id="prompt">cinematic camera move over the flower, soft light</textarea>
+
+      <button id="startBtn">Start</button>
+
+      <div id="result">
+        <video id="out" controls style="display:none"></video>
+        <div id="links"></div>
+      </div>
+
+      <h3>Log</h3>
+      <div id="log"></div>
+    </main>
+
+    <script>
+      const logBox = document.getElementById('log');
+      function log(...args) {
+        const pre = document.createElement('pre');
+        pre.textContent = args.map(x => typeof x === 'string' ? x : JSON.stringify(x, null, 2)).join(' ');
+        logBox.prepend(pre);
+      }
+
+      async function startVidu(imageUrl, prompt) {
+        const res = await fetch('/.netlify/functions/vidu-proxy', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            path: '/ent/v2/img2video',
+            method: 'POST',
+            payload: { model: 'vidu2.0', images: [imageUrl], prompt }
+          })
+        }).then(r => r.json());
+        if (!res?.ok) throw new Error('start failed: ' + JSON.stringify(res));
+        return res.data?.task_id;
+      }
+
+      async function waitVidu(taskId, { interval=4000, tries=80 } = {}) {
+        for (let i = 0; i < tries; i++) {
+          const res = await fetch('/.netlify/functions/vidu-proxy', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+              path: `/ent/v2/tasks/${taskId}/creations`,
+              method: 'GET'
+            })
+          }).then(r => r.json());
+
+          const d = res?.data || {};
+          const state = String(d.state || d.status || '').toLowerCase();
+          const creation = Array.isArray(d.creations) ? d.creations[0] : null;
+          const url = creation?.url || creation?.video?.url || d.video_url || d.url;
+
+          log('poll', i, { state, url });
+
+          if (state === 'success') {
+            if (!url) throw new Error('Ready but no video URL: ' + JSON.stringify(res));
+            return url;
+          }
+          if (state === 'failed') throw new Error('Vidu failed: ' + JSON.stringify(res));
+          await new Promise(r => setTimeout(r, interval));
+        }
+        throw new Error('Timeout');
+      }
+
+      document.getElementById('startBtn').onclick = async () => {
+        const btn = document.getElementById('startBtn');
+        const img = document.getElementById('imgUrl').value.trim();
+        const prompt = document.getElementById('prompt').value.trim();
+
+        btn.disabled = true; btn.textContent = 'Работаю...';
+        document.getElementById('out').style.display = 'none';
+        document.getElementById('links').innerHTML = '';
+
+        try {
+          const taskId = await startVidu(img, prompt);
+          log('taskId:', taskId);
+
+          const videoUrl = await waitVidu(taskId);
+          log('VIDEO URL:', videoUrl);
+
+          const v = document.getElementById('out');
+          v.src = videoUrl; v.style.display = 'block'; v.play();
+
+          const a = document.createElement('a');
+          a.href = videoUrl; a.textContent = '⬇ Скачать видео'; a.download = 'vidu.mp4';
+          document.getElementById('links').append(a);
+        } catch (e) {
+          log('Ошибка:', e?.message || e);
+        } finally {
+          btn.disabled = false; btn.textContent = 'Start';
+        }
+      };
+    </script>
+  </body>
 </html>

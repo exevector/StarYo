@@ -1,134 +1,174 @@
 // netlify/functions/nano-edit.js
-// Универсальная функция: mode = "remove" | "insert" | "replace"
-// Вход: {
-//   mode: "replace",
-//   image: <dataURL | http(s) URL>,           // кадр
-//   insert?: <dataURL | http(s) URL>,         // селфи/объект для вставки (для insert/replace)
-//   target?: "man on the right",              // кого/что удалить/заменить (подсказка модели)
-//   bbox?: {x: number, y: number, w: number, h: number}, // необязательный бокс-подсказка
-//   prompt?: "…",                             // доп.инструкция (опционально)
-// }
-export default async function handler(request) {
-  if (request.method === "OPTIONS") {
-    return new Response("", { status: 204, headers: cors() });
-  }
-  if (request.method !== "POST") {
-    return json(400, { ok: false, error: "PATH_NOT_ALLOWED", message: "POST only" });
-  }
+// Универсальный edit: mode=replace|insert|remove
+// Вход: { image, insert?, target?, bbox?, prompt?, mode? }
+// image/insert могут быть dataURL | чистый base64 | https URL
+// Требуются ENV: NANO_API_URL, NANO_API_KEY
 
-  const API_URL = process.env.NANO_API_URL; // e.g. https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent
-  const API_KEY = process.env.NANO_API_KEY; // Google AI key (Gemini)
-  if (!API_URL || !API_KEY) {
-    return json(500, { ok: false, error: "MISCONFIG", need: ["NANO_API_URL","NANO_API_KEY"] });
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Methods': 'POST,OPTIONS'
+};
+
+exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers: CORS };
   }
-
-  let body = {};
-  try { body = await request.json(); } catch {}
-  const {
-    mode = "replace",
-    image,
-    insert,
-    target = "the target object",
-    bbox,
-    prompt
-  } = body || {};
-
-  if (!image) return json(400, { ok: false, error: "MISSING_IMAGE" });
-  if ((mode === "insert" || mode === "replace") && !insert) {
-    return json(400, { ok: false, error: "MISSING_INSERT", message: "Need 'insert' for insert/replace" });
+  if (event.httpMethod !== 'POST') {
+    return json(405, { error: 'Method not allowed' });
   }
 
   try {
-    const baseInline   = await toInline(image);
-    const insertInline = insert ? await toInline(insert) : null;
+    const body = JSON.parse(event.body || '{}');
+    const { mode = 'replace', image, insert, image_url, insert_url, target, bbox, prompt } = body;
 
-    const parts = [];
-    // Инструкция для модели
-    parts.push({
-      text: [
-        `Task: ${mode.toUpperCase()} object.`,
-        bbox ? `Target box: x=${bbox.x}, y=${bbox.y}, w=${bbox.w}, h=${bbox.h}.` : `Target: ${target}.`,
-        mode === "remove"
-          ? `Remove ${target} from the scene and plausibly fill the background.`
-          : mode === "insert"
-          ? `Insert the second image object into the first image ${bbox ? "inside given box" : "near the described target"}; keep perspective and lighting.`
-          : `Replace ${target} in the first image with the person/object from the second image; keep pose, lighting and background; preserve other people.` ,
-        `Output PNG with transparent pixels only where needed (no extra borders).`,
-        prompt ? `Extra: ${prompt}` : ""
-      ].filter(Boolean).join(" ")
-    });
-
-    // 1-й инпут — исходный кадр
-    parts.push({ inline_data: baseInline });
-    // 2-й инпут — объект/селфи, если insert/replace
-    if (insertInline) parts.push({ inline_data: insertInline });
-
-    const payload = { contents: [{ parts }] };
-
-    const r = await fetch(`${API_URL}?key=${API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const txt = await r.text();
-    if (!r.ok) {
-      return json(r.status, { ok: false, error: "GEMINI_ERROR", detail: txt.slice(0, 2000) });
-    }
-    let data;
-    try { data = JSON.parse(txt); }
-    catch { return json(500, { ok: false, error: "PARSE_ERROR", detail: txt.slice(0, 2000) }); }
-
-    // Достаём картинку из ответа
-    const partsOut = data?.candidates?.[0]?.content?.parts || [];
-    const out64 =
-      partsOut.find(p => p.inline_data)?.inline_data?.data ||
-      partsOut.find(p => p.file_data)?.file_data?.data || null;
-
-    if (!out64) {
-      // текст модели (диагностика)
-      const note = partsOut.find(p => p.text)?.text || null;
-      return json(200, { ok: true, note: "NO_IMAGE_FROM_MODEL", modelText: note, data });
+    if (!image && !image_url) return json(400, { error: 'Missing image' });
+    if (!['replace','insert','remove'].includes(String(mode))) {
+      return json(400, { error: 'mode must be replace | insert | remove' });
     }
 
-    return json(200, { ok: true, mode, result: { base64: out64, format: "png" } });
+    const img = await loadAsInlineData(image || image_url);
+    const ins = insert || insert_url ? await loadAsInlineData(insert || insert_url) : null;
+
+    const instruction = buildInstruction({ mode, target, bbox, prompt, hasInsert: !!ins });
+
+    const payload = {
+      contents: [{
+        role: "user",
+        parts: [
+          { text: instruction },
+          { inlineData: { mimeType: img.mime, data: img.base64 } },
+          ...(ins ? [
+            { text: "Use the following reference image for the inserted/replaced subject:" },
+            { inlineData: { mimeType: ins.mime, data: ins.base64 } }
+          ] : [])
+        ]
+      }],
+      generationConfig: {
+        temperature: 0.3
+      }
+    };
+
+    const url = `${process.env.NANO_API_URL}${process.env.NANO_API_URL.includes('?') ? '&':'?'}key=${process.env.NANO_API_KEY}`;
+    const res = await withRetry(() => fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }), { tries: 4, baseDelayMs: 800 });
+
+    const j = await res.json();
+
+    const out = pickInlineImage(j);
+    if (!out) {
+      return json(502, { error: 'No image in Gemini response', raw: j });
+    }
+
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json', ...CORS },
+      body: JSON.stringify({ ok: true, result: { mime: out.mime, base64: out.base64 } })
+    };
+
   } catch (e) {
-    return json(500, { ok: false, error: "EDIT_FAIL", message: String(e?.message || e) });
+    return json(500, { error: String(e && e.message || e) });
   }
-}
+};
 
-// === helpers ===
-function cors() {
+// ---------- helpers ----------
+
+function json(statusCode, obj) {
   return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST,OPTIONS",
+    statusCode,
+    headers: { 'Content-Type': 'application/json', ...CORS },
+    body: JSON.stringify(obj)
   };
 }
-function json(status, data) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json", ...cors() },
-  });
-}
-async function toInline(src) {
-  if (typeof src !== "string") throw new Error("Bad image src");
-  if (src.startsWith("data:")) {
-    const m = src.match(/^data:([^;]+);base64,(.+)$/);
-    if (!m) throw new Error("Bad dataURL");
-    return { mime_type: m[1], data: m[2] };
+
+async function loadAsInlineData(input) {
+  // dataURL: data:image/png;base64,....
+  if (typeof input === 'string' && input.startsWith('data:')) {
+    const m = input.match(/^data:([^;]+);base64,(.+)$/);
+    const mime = m?.[1] || 'image/png';
+    const base64 = m?.[2] || input.split(',')[1];
+    if (!base64) throw new Error('Bad dataURL');
+    return { mime, base64 };
   }
-  // http(s) URL → fetch → base64
-  const res = await fetch(src, { headers: { Range: "bytes=0-" } });
-  if (!res.ok) throw new Error(`Fetch image failed: ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  const mime = res.headers.get("content-type") || guessMime(src) || "image/jpeg";
-  return { mime_type: mime, data: buf.toString("base64") };
+  // чистый base64 (грубая эвристика)
+  if (typeof input === 'string' && /^[A-Za-z0-9+/=\r\n]+$/.test(input.slice(0, 200)) && !/^https?:\/\//i.test(input)) {
+    return { mime: 'image/png', base64: input.replace(/\r?\n/g,'') };
+  }
+  // URL → скачать сервером
+  if (typeof input === 'string' && /^https?:\/\//i.test(input)) {
+    const r = await fetch(input);
+    if (!r.ok) throw new Error(`fetch ${r.status} for ${input}`);
+    const ct = r.headers.get('content-type') || 'image/png';
+    const b64 = Buffer.from(await r.arrayBuffer()).toString('base64');
+    return { mime: ct, base64: b64 };
+  }
+  throw new Error('Unsupported image input');
 }
-function guessMime(u) {
-  const s = u.toLowerCase();
-  if (s.endsWith(".png")) return "image/png";
-  if (s.endsWith(".webp")) return "image/webp";
-  if (s.endsWith(".jpg") || s.endsWith(".jpeg")) return "image/jpeg";
+
+function buildInstruction({ mode, target, bbox, prompt, hasInsert }) {
+  const lines = [];
+  lines.push("You are a professional, precise visual editor. Edit the FIRST image ONLY.");
+  lines.push(`Mode: ${mode}.`);
+  if (target) lines.push(`Target object/person: ${target}.`);
+  if (bbox && Number.isFinite(bbox.x) && Number.isFinite(bbox.y) && Number.isFinite(bbox.w) && Number.isFinite(bbox.h)) {
+    lines.push(`Restrict edits to the bounding box: x=${bbox.x}, y=${bbox.y}, w=${bbox.w}, h=${bbox.h}. Do not alter pixels outside this box.`);
+  }
+  if (mode === 'replace' || mode === 'insert') {
+    if (hasInsert) {
+      lines.push("Use the SECOND image as the visual reference for identity/appearance (face, hair, clothing as applicable).");
+    } else {
+      lines.push("There is no reference image provided. Perform the operation based on the instruction text.");
+    }
+    lines.push("Match perspective, lighting, color temperature, grain/noise and shadowing to blend seamlessly.");
+  }
+  if (mode === 'remove') {
+    lines.push("Remove the target cleanly and realistically, reconstructing the background with inpainting. No artifacts.");
+  }
+  lines.push("Keep all non-target areas intact.");
+  if (prompt) lines.push(String(prompt));
+  lines.push("Output: return ONLY the final edited image as inline binary. PNG format preferred.");
+  return lines.join('\n');
+}
+
+async function withRetry(fn, { tries = 3, baseDelayMs = 700 } = {}) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fn();
+      if (!r.ok) {
+        // retry on 429/5xx
+        if (r.status === 429 || (r.status >= 500 && r.status <= 599)) {
+          await delay(baseDelayMs * Math.pow(2, i) + jitter(200));
+          last = new Error(`HTTP ${r.status}`);
+          continue;
+        }
+        const txt = await r.text().catch(()=> '');
+        throw new Error(`HTTP ${r.status} ${txt}`);
+      }
+      return r;
+    } catch (e) {
+      last = e;
+      await delay(baseDelayMs * Math.pow(2, i) + jitter(200));
+    }
+  }
+  throw last || new Error('retry failed');
+}
+
+function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
+function jitter(n){ return Math.floor(Math.random()*n); }
+
+function pickInlineImage(resp) {
+  const cands = resp?.candidates || [];
+  for (const c of cands) {
+    const parts = c?.content?.parts || [];
+    for (const p of parts) {
+      if (p?.inlineData?.data) {
+        return { mime: p.inlineData.mimeType || 'image/png', base64: p.inlineData.data };
+      }
+    }
+  }
   return null;
 }
